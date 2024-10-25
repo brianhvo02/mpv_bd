@@ -27,7 +27,7 @@ public:
     void command(const QVariant& params);
     void setProperty(const QString& name, const QVariant& value);
     QVariant getProperty(const QString& name) const;
-    QSize sizeHint() const { return QSize(480, 270);}
+    QSize sizeHint() const { return QSize(640, 360);}
     void open_disc(QString dir, bool skip_first_play);
     void player_end_file();
     void update_player_info();
@@ -53,7 +53,7 @@ private Q_SLOTS:
 private:
     void handle_mpv_event(mpv_event *event);
     static void on_update(void *ctx);
-    void _wait_idle();
+    bool _wait_idle();
     void _play();
     void _read_to_eof();
     BLURAY_CLIP_INFO _get_clip_info();

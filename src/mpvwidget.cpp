@@ -15,6 +15,7 @@
 #include <QScreen>
 #include <QOpenGLTexture>
 #include <QPainter>
+#include <QWindow>
 
 static void wakeup(void *ctx) {
     QMetaObject::invokeMethod((MpvWidget*)ctx, "on_mpv_events", Qt::QueuedConnection);
@@ -45,8 +46,10 @@ MpvWidget::MpvWidget(QWidget *parent, Qt::WindowFlags f): QOpenGLWidget(parent, 
         throw std::runtime_error("could not create mpv context");
 
     // mpv_set_option_string(mpv, "terminal", "yes");
-    // mpv_set_option_string(mpv, "msg-level", "all=v");
+    mpv_set_option_string(mpv, "msg-level", "all=v");
     mpv_set_option_string(mpv, "vo", "libmpv");
+    int flag = 1;
+    mpv_set_option(mpv, "orawts", MPV_FORMAT_FLAG, &flag);
     if (mpv_initialize(mpv) < 0)
         throw std::runtime_error("could not initialize mpv context");
 
@@ -79,7 +82,7 @@ QVariant MpvWidget::getProperty(const QString &name) const {
 }
 
 void MpvWidget::initializeGL() {
-    mpv_opengl_init_params gl_init_params[1] = {get_proc_address, nullptr, nullptr};
+    mpv_opengl_init_params gl_init_params[1] = {get_proc_address, nullptr};
     mpv_render_param params[]{
         {MPV_RENDER_PARAM_API_TYPE, const_cast<char *>(MPV_RENDER_API_TYPE_OPENGL)},
         {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
@@ -92,7 +95,13 @@ void MpvWidget::initializeGL() {
 }
 
 void MpvWidget::paintGL() {
-    mpv_opengl_fbo mpfbo{static_cast<int>(defaultFramebufferObject()), width(), height(), 0};
+    mpv_opengl_fbo mpfbo {
+        static_cast<int>(defaultFramebufferObject()), 
+        static_cast<int>(width() * devicePixelRatio()), 
+        static_cast<int>(height() * devicePixelRatio()),
+        0
+    };
+
     int flip_y{1};
 
     mpv_render_param params[] = {
@@ -100,15 +109,17 @@ void MpvWidget::paintGL() {
         {MPV_RENDER_PARAM_FLIP_Y, &flip_y},
         {MPV_RENDER_PARAM_INVALID, nullptr}
     };
-    // See render_gl.h on what OpenGL environment mpv expects, and
-    // other API details.
+    
     mpv_render_context_render(mpv_gl, params);
 
     if (!menu_flush) return;
 
+    double rx = width() / getProperty("width").toDouble();
+    double ry = height() / getProperty("height").toDouble();
+
     QPainter p(this);
     for (auto graphic : graphics) {
-        QRectF target(graphic.x, graphic.y, graphic.w, graphic.h);
+        QRectF target(graphic.x * rx, graphic.y * ry, graphic.w * rx, graphic.h * ry);
         p.drawImage(target, graphic.g);
     }
 }
@@ -135,6 +146,9 @@ void MpvWidget::keyPressEvent(QKeyEvent *event) {
             break;
         case Qt::Key_Return:
             bd_user_input(bd, pts, BD_VK_ENTER);
+            if (_wait_idle())
+                _play();
+            
             break;
 
         default: ;
@@ -148,8 +162,10 @@ void MpvWidget::mousePressEvent(QMouseEvent *event) {
     uint64_t sec = getProperty("time-pos").toUInt();
     BLURAY_CLIP_INFO clip_info = _get_clip_info();
     uint64_t pts = clip_info.in_time + sec * 45000;
+    double rx = getProperty("width").toDouble() / width();
+    double ry = getProperty("height").toDouble() / height();
     QPointF point = event->pos();
-    bd_mouse_select(bd, pts, point.x(), point.y());
+    bd_mouse_select(bd, pts, point.x() * rx, point.y() * ry);
 }
 
 void MpvWidget::mouseDoubleClickEvent(QMouseEvent *event) {
@@ -160,6 +176,8 @@ void MpvWidget::mouseDoubleClickEvent(QMouseEvent *event) {
     BLURAY_CLIP_INFO clip_info = _get_clip_info();
     uint64_t pts = clip_info.in_time + sec * 45000;
     bd_user_input(bd, pts, BD_VK_MOUSE_ACTIVATE);
+    if (_wait_idle())
+        _play();
 }
 
 void MpvWidget::on_mpv_events() {
@@ -182,7 +200,7 @@ void MpvWidget::handle_mpv_event(mpv_event *event) {
                     Q_EMIT positionChanged(time);
                 }
                 
-                if (bd != NULL)
+                if (bd != NULL && !player_info[BD_EVENT_TITLE])
                     update_player_info();
             } else if (strcmp(prop->name, "duration") == 0) {
                 if (prop->format == MPV_FORMAT_DOUBLE) {
@@ -197,6 +215,8 @@ void MpvWidget::handle_mpv_event(mpv_event *event) {
             break;
         }
         case MPV_EVENT_PLAYBACK_RESTART: {
+            // setMinimumSize(640, 360);
+            // setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
             if (!seek) break;
             update_player_info();
             seek = false;
@@ -209,12 +229,10 @@ void MpvWidget::handle_mpv_event(mpv_event *event) {
             break;
         }
         case MPV_EVENT_FILE_LOADED: {
-            QScreen *screen = QGuiApplication::primaryScreen();
-            QRect screenGeometry = screen->geometry();
-
-            if (getProperty("width").toInt() > screenGeometry.width() || getProperty("height").toInt() > screenGeometry.height())
-                ((MainWindow*)parentWidget())->resize(screenGeometry.width(), screenGeometry.height());
-            else setFixedSize(getProperty("width").toInt(), getProperty("height").toInt());
+            // QRect screenGeometry = screen()->geometry();
+            // if (getProperty("width").toInt() > screenGeometry.width() || getProperty("height").toInt() > screenGeometry.height())
+            //     ((MainWindow*)parentWidget())->resize(screenGeometry.width(), screenGeometry.height());
+            // else setFixedSize(getProperty("width").toInt(), getProperty("height").toInt());
 
             if (start_time) {
                 setProperty("time-pos", (qulonglong)start_time);
@@ -260,8 +278,9 @@ void MpvWidget::on_update(void *ctx) {
     printf("%-25s " f "\n", #e ":", ev.param);     \
       break
 
-void MpvWidget::_wait_idle() {
+bool MpvWidget::_wait_idle() {
     BD_EVENT ev;
+    bool new_play = false;
 
     do {
         bd_read_ext(bd, NULL, 0, &ev);
@@ -279,12 +298,21 @@ void MpvWidget::_wait_idle() {
 
             /* current playback position */
 
-            PRINT_EV1(ANGLE,    "%u");
-            PRINT_EV1(TITLE,    "%u");
-            PRINT_EV1(PLAYLIST, "%05u.mpls");
-            PRINT_EV1(PLAYITEM, "%u");
-            PRINT_EV1(PLAYMARK, "%u");
-            PRINT_EV1(CHAPTER,  "%u");
+            // PRINT_EV1(ANGLE,    "%u");
+            // PRINT_EV1(TITLE,    "%u");
+            // PRINT_EV1(PLAYLIST, "%05u.mpls");
+            // PRINT_EV1(PLAYITEM, "%u");
+            // PRINT_EV1(PLAYMARK, "%u");
+            // PRINT_EV1(CHAPTER,  "%u");
+            case BD_EVENT_ANGLE:
+            case BD_EVENT_TITLE:
+            case BD_EVENT_PLAYLIST:
+            case BD_EVENT_PLAYITEM:
+            case BD_EVENT_PLAYMARK:
+            case BD_EVENT_CHAPTER:
+                new_play = true;
+                break;
+            
             PRINT_EV0(END_OF_TITLE);
 
             PRINT_EV1(STEREOSCOPIC_STATUS,  "%u");
@@ -295,7 +323,7 @@ void MpvWidget::_wait_idle() {
             case BD_EVENT_PLAYLIST_STOP:
                 _wait_idle();
                 _play();
-                return;
+                return false;
 
             /* Interactive */
 
@@ -344,6 +372,8 @@ void MpvWidget::_wait_idle() {
         
         player_info[(bd_event_e)ev.event] = ev.param;
     } while (ev.event != BD_EVENT_NONE && ev.event != BD_EVENT_ERROR);
+
+    return new_play;
 }
 
 BLURAY_TITLE_INFO MpvWidget::_get_playlist_info() {
@@ -362,7 +392,7 @@ void MpvWidget::_play() {
     BLURAY_CLIP_INFO clip_info = _get_clip_info();
     
     if (player_info[BD_EVENT_TITLE] != 0) {
-        uint64_t chapter_start = playlist_info.marks[player_info[BD_EVENT_CHAPTER] - 1].start;
+        uint64_t chapter_start = playlist_info.chapters[player_info[BD_EVENT_CHAPTER] - 1].start;
         for (uint i = 0; i < player_info[BD_EVENT_PLAYITEM]; i++) {
             BLURAY_CLIP_INFO clip_info = playlist_info.clips[i];
             chapter_start -= clip_info.out_time - clip_info.in_time;
@@ -377,7 +407,7 @@ static void _overlay_cb(void *h, const struct bd_overlay_s * const ov) {
     MpvWidget *m_mpv = (MpvWidget *)h;
 
     if (ov) {
-        printf("OVERLAY @%ld p%d %d: %d,%d %dx%d\n", (long)ov->pts, ov->plane, ov->cmd, ov->x, ov->y, ov->w, ov->h);
+        // printf("OVERLAY @%ld p%d %d: %d,%d %dx%d\n", (long)ov->pts, ov->plane, ov->cmd, ov->x, ov->y, ov->w, ov->h);
 
         if (ov->cmd == BD_OVERLAY_CLEAR || ov->cmd == BD_OVERLAY_CLOSE) {
             m_mpv->menu_flush = false;
@@ -592,7 +622,6 @@ void MpvWidget::open_menu() {
     BLURAY_CLIP_INFO clip_info = _get_clip_info();
     bd_menu_call(bd, clip_info.in_time + sec * 45000);
     _wait_idle();
-    QString filepath = dir + "/BDMV/STREAM/" + QString::fromUtf8(_get_clip_info().clip_id) + ".m2ts";
     _play();
 }
 
@@ -602,4 +631,5 @@ void MpvWidget::open_popup() {
     uint64_t pts = clip_info.in_time + sec * 45000;
 
     bd_user_input(bd, pts, BD_VK_POPUP);
+    _wait_idle();
 }

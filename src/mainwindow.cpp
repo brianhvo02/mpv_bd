@@ -34,7 +34,7 @@ MainWindow::MainWindow(QWidget *parent) : QWidget(parent) {
 }
 
 void MainWindow::openMedia() {
-    QString dir = QFileDialog::getExistingDirectory(0, "Open disc", "/mnt/c/Users/Brian Vo/Videos/Volume 1", QFileDialog::ShowDirsOnly);
+    QString dir = QFileDialog::getExistingDirectory(0, "Open disc", "/Users/brianhvo02/Desktop/Volume 1", QFileDialog::ShowDirsOnly);
     if (dir.isEmpty() || !std::filesystem::exists(dir.toStdString() + "/BDMV"))
         return;
     m_mpv->open_disc(dir, m_firstPlayBox->checkState() == Qt::Checked);
